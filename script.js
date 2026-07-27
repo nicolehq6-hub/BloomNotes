@@ -229,8 +229,8 @@
   let authQuoteTimer = null;
 
   function renderAuthQuote(i) {
-    const textEl = $("#auth-quote-text");
-    const authorEl = $("#auth-quote-author");
+    const textEl = document.querySelector(".auth-visual-quote-text");
+    const authorEl = document.querySelector(".auth-visual-quote-author");
     const dots = $$("#auth-visual-dots span");
     if (!textEl) return;
     textEl.classList.add("auth-quote-fade");
@@ -279,7 +279,7 @@
     }
   });
 
-  $$(".password-toggle").forEach((btn) => {
+  $$(".auth-password-toggle").forEach((btn) => {
     btn.addEventListener("click", () => {
       const input = document.getElementById(btn.dataset.pwToggle);
       const show = input.type === "password";
@@ -336,12 +336,14 @@
     if (currentUser) {
       signedOut.hidden = true;
       signedIn.hidden = false;
+      $("#account-signout").hidden = false;
       $("#account-name").textContent = currentUser.name;
       $("#account-email").textContent = currentUser.email;
       renderAvatarInto($("#account-avatar"), currentUser);
     } else {
       signedOut.hidden = false;
       signedIn.hidden = true;
+      $("#account-signout").hidden = true;
     }
   }
 
@@ -975,6 +977,7 @@
 
     if (!inTrash) {
       card.querySelector(".edit-btn").addEventListener("click", () => toggleNoteEdit(card, note));
+      card.querySelector(".note-body").addEventListener("click", () => openNoteModal(note.id));
       card.querySelector(".fav-btn").addEventListener("click", () => { note.favorite = !note.favorite; rerenderAllViews(); });
       card.querySelector(".pin-btn").addEventListener("click", () => { note.pinned = !note.pinned; rerenderAllViews(); });
       card.querySelector(".dup-btn").addEventListener("click", () => {
@@ -1087,6 +1090,118 @@
     renderNotes(); renderFavorites(); renderTrash(); renderDashboard();
     toast("Note saved");
   }
+
+  /* ---------- note preview modal ---------- */
+  const noteModalOverlay = $("#note-modal-overlay");
+  const noteModal = $(".note-modal");
+  let currentModalNoteId = null;
+
+  function openNoteModal(noteId) {
+    const note = notes.find((n) => n.id === noteId);
+    if (!note) return;
+
+    currentModalNoteId = noteId;
+    const time = new Date(note.created).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+    const editedTime = note.updated && note.updated !== note.created ? ` (Edited ${relativeTime(note.updated)})` : "";
+
+    $("#note-modal-title").textContent = note.html.replace(/<[^>]*>/g, "").slice(0, 100) || "Untitled Note";
+    $("#note-modal-date").textContent = time + editedTime;
+    $("#note-modal-content").innerHTML = note.html;
+    $("#note-modal-category").innerHTML = `<span class="note-category-badge">${escapeHtml(note.category || "Personal")}</span>`;
+
+    if (note.pinned) {
+      $("#note-modal-pinned").style.display = "inline";
+    } else {
+      $("#note-modal-pinned").style.display = "none";
+    }
+
+    if (note.tags && note.tags.length) {
+      $("#note-modal-tags").innerHTML = note.tags.map((t) => `<span class="tag-chip">${escapeHtml(t)}</span>`).join("");
+    } else {
+      $("#note-modal-tags").innerHTML = "";
+    }
+
+    if (note.checklist && note.checklist.length) {
+      const checklistHtml = note.checklist.map((item) => `
+        <div class="note-modal-checklist-item">
+          <input type="checkbox" ${item.done ? "checked" : ""} disabled />
+          <span>${escapeHtml(item.text)}</span>
+        </div>
+      `).join("");
+      $("#note-modal-checklist").innerHTML = checklistHtml;
+    } else {
+      $("#note-modal-checklist").innerHTML = "";
+    }
+
+    updateNoteModalActions(note);
+    noteModalOverlay.classList.add("visible");
+    document.body.style.overflow = "hidden";
+  }
+
+  function closeNoteModal() {
+    noteModalOverlay.classList.remove("visible");
+    document.body.style.overflow = "";
+    currentModalNoteId = null;
+  }
+
+  function updateNoteModalActions(note) {
+    const inTrash = note.deleted;
+
+    const editBtn = $("#note-modal-edit");
+    const pinBtn = $("#note-modal-pin");
+    const deleteBtn = $("#note-modal-delete");
+
+    editBtn.onclick = () => {
+      closeNoteModal();
+      const card = document.querySelector(`[data-id="${note.id}"]`);
+      if (card) {
+        const body = card.closest(".note-card")?.querySelector(".note-body");
+        if (body) startNoteEdit(body, note);
+      }
+    };
+
+    if (inTrash) {
+      pinBtn.style.display = "none";
+      editBtn.style.display = "none";
+      deleteBtn.textContent = "🗑️ Delete Forever";
+      deleteBtn.onclick = async () => {
+        const ok = await askConfirm("Permanently delete this note? This can't be undone.", "Delete forever");
+        if (!ok) return;
+        notes = notes.filter((n) => n.id !== note.id);
+        closeNoteModal();
+        rerenderAllViews();
+        toast("Note permanently deleted");
+      };
+    } else {
+      pinBtn.style.display = "inline-flex";
+      editBtn.style.display = "inline-flex";
+      deleteBtn.textContent = "🗑️ Delete";
+
+      pinBtn.textContent = note.pinned ? "📌 Unpin" : "📌 Pin";
+      pinBtn.onclick = () => {
+        note.pinned = !note.pinned;
+        persistNotes();
+        updateNoteModalActions(note);
+        renderNotes(); renderFavorites(); renderDashboard();
+      };
+
+      deleteBtn.onclick = () => {
+        note.deleted = true;
+        persistNotes();
+        closeNoteModal();
+        rerenderAllViews();
+        toast("Note moved to Trash");
+      };
+    }
+  }
+
+  $("#note-modal-close").addEventListener("click", closeNoteModal);
+  noteModalOverlay.addEventListener("click", (e) => {
+    if (e.target === noteModalOverlay) closeNoteModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && noteModalOverlay.classList.contains("visible")) closeNoteModal();
+  });
 
   /* ---------- reminders ---------- */
   function persistReminders() { store.set("bloom.reminders", reminders); }

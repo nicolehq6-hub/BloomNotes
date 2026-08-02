@@ -1,23 +1,158 @@
 (() => {
   "use strict";
 
-  /* ---------- storage helpers ---------- */
-  const store = {
-    get(key, fallback) {
-      try {
-        const v = localStorage.getItem(key);
-        return v ? JSON.parse(v) : fallback;
-      } catch { return fallback; }
+  const AUTH_TOKEN_KEY = "bloom.auth.token";
+
+  async function requestJson(url, options = {}) {
+    const headers = new Headers(options.headers || {});
+    if (options.body && !headers.has("Content-Type")) {
+      headers.set("Content-Type", "application/json");
+    }
+    const response = await fetch(url, { ...options, headers });
+    const text = await response.text();
+    let payload = {};
+    if (text) {
+      try { payload = JSON.parse(text); } catch { payload = { message: text }; }
+    }
+    if (!response.ok) {
+      throw new Error(payload.error || payload.message || "Request failed");
+    }
+    return payload;
+  }
+
+  const auth = {
+    _listeners: [],
+    _currentUser: null,
+    async setPersistence() {
+      return Promise.resolve();
     },
-    set(key, val) { localStorage.setItem(key, JSON.stringify(val)); },
+    onAuthStateChanged(cb) {
+      this._listeners.push(cb);
+      const run = async () => {
+        const user = await this._restoreSession();
+        cb(user);
+      };
+      void run();
+      return () => {
+        this._listeners = this._listeners.filter((listener) => listener !== cb);
+      };
+    },
+    get currentUser() {
+      return this._currentUser;
+    },
+    async signInWithEmailAndPassword(email, password) {
+      const payload = await requestJson("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ email, password }),
+      });
+      this._setSession(payload);
+      return { user: this._currentUser };
+    },
+    async createUserWithEmailAndPassword(email, password, displayName = "") {
+      const payload = await requestJson("/api/auth/signup", {
+        method: "POST",
+        body: JSON.stringify({ name: displayName, email, password }),
+      });
+      this._setSession(payload);
+      return { user: this._currentUser };
+    },
+    async signOut() {
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      try {
+        if (token) {
+          await requestJson("/api/auth/logout", {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}` },
+          });
+        }
+      } catch (error) {
+        console.error(error);
+      }
+      localStorage.removeItem(AUTH_TOKEN_KEY);
+      this._currentUser = null;
+      this._notify();
+    },
+    _setSession(payload) {
+      const token = payload?.token;
+      if (token) {
+        localStorage.setItem(AUTH_TOKEN_KEY, token);
+      }
+      if (payload?.user) {
+        this._currentUser = {
+          uid: payload.user.id,
+          displayName: payload.user.name || "",
+          email: payload.user.email || "",
+          createdAt: payload.user.createdAt || Date.now(),
+          async updateProfile({ displayName }) {
+            if (!displayName) return;
+            const token = localStorage.getItem(AUTH_TOKEN_KEY);
+            const response = await requestJson("/api/me/profile", {
+              method: "PUT",
+              headers: { Authorization: `Bearer ${token}` },
+              body: JSON.stringify({ name: displayName, email: this.email }),
+            });
+            this.displayName = response.user.name;
+            this.email = response.user.email;
+          },
+          async updateEmail(email) {
+            const token = localStorage.getItem(AUTH_TOKEN_KEY);
+            const response = await requestJson("/api/me/profile", {
+              method: "PUT",
+              headers: { Authorization: `Bearer ${token}` },
+              body: JSON.stringify({ name: this.displayName, email }),
+            });
+            this.email = response.user.email;
+          },
+        };
+        this._notify();
+      }
+    },
+    _notify() {
+      this._listeners.forEach((listener) => listener(this._currentUser));
+    },
+    async _restoreSession() {
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      if (!token) {
+        this._currentUser = null;
+        return null;
+      }
+      try {
+        const payload = await requestJson("/api/me", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        this._setSession(payload);
+        return this._currentUser;
+      } catch (error) {
+        console.error(error);
+        localStorage.removeItem(AUTH_TOKEN_KEY);
+        this._currentUser = null;
+        return null;
+      }
+    },
   };
 
   const uid = () => Math.random().toString(36).slice(2, 10);
 
+  function createDefaultSettings() {
+    return {
+      theme: "pink",
+      mode: "dark",
+      compact: false,
+      offline: false,
+      fontSize: "md",
+      notifications: false,
+      language: "en",
+    };
+  }
+
+  function defaultCategories() {
+    return ["Personal", "School", "Work", "Ideas"];
+  }
+
   /* ---------- state ---------- */
-  let notes = store.get("bloom.notes", []);
-  let reminders = store.get("bloom.reminders", []);
-  let currentUser = store.get("bloom.user", null);
+  let notes = [];
+  let reminders = [];
+  let currentUser = null; // { uid, name, email, avatar, createdAt }
   let reminderFilter = "all";
   let calDate = new Date();
   let selectedDay = null;
@@ -25,27 +160,14 @@
   let notesCategoryFilter = "";
   let notesTagFilter = "";
   let notesSort = "newest";
-  let editingNoteId = null;
 
-  let categories = store.get("bloom.categories", ["Personal", "School", "Work", "Ideas"]);
-  let tags = store.get("bloom.tags", []);
+  let categories = defaultCategories();
+  let tags = [];
   let checklistDraft = [];
   let pendingNoteColor = "";
+  let settings = createDefaultSettings();
 
-  const settings = store.get("bloom.settings", {
-    theme: "pink",
-    mode: "dark",
-    compact: false,
-    offline: false,
-    fontSize: "md",
-    notifications: false,
-    language: "en",
-  });
-  if (!settings.fontSize) settings.fontSize = "md";
-  if (typeof settings.notifications !== "boolean") settings.notifications = false;
-  if (!settings.language) settings.language = "en";
-
-  /* ---------- migrate legacy notes to the new shape ---------- */
+  /* ---------- migrate/normalize note shape ---------- */
   function migrateNote(n) {
     return {
       id: n.id,
@@ -54,6 +176,7 @@
       favorite: !!n.favorite,
       archived: !!n.archived,
       deleted: !!n.deleted,
+      deletedAt: n.deletedAt || null,
       color: n.color || "",
       category: n.category || "Personal",
       tags: Array.isArray(n.tags) ? n.tags : [],
@@ -62,7 +185,140 @@
       updated: n.updated || n.created || Date.now(),
     };
   }
-  notes = notes.map(migrateNote);
+
+  /* ---------- sync ---------- */
+  let syncTimer = null;
+  let syncPollTimer = null;
+
+  function scheduleSync() {
+    if (!currentUser || !currentUser.uid) return;
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(async () => {
+      try {
+        const token = localStorage.getItem(AUTH_TOKEN_KEY);
+        await requestJson("/api/me/data", {
+          method: "PUT",
+          headers: { Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            notes,
+            reminders,
+            categories,
+            tags,
+            settings,
+          }),
+        });
+      } catch (error) {
+        console.error("Sync failed:", error);
+      }
+    }, 400);
+  }
+
+  function applyUserDoc(data) {
+    notes = (data.notes || []).map(migrateNote);
+    reminders = data.reminders || [];
+    categories = data.categories && data.categories.length ? data.categories : defaultCategories();
+    tags = data.tags || [];
+    settings = { ...createDefaultSettings(), ...(data.settings || {}) };
+    currentUser = {
+      ...currentUser,
+      name: data.name || currentUser?.name || "User",
+      email: data.email || currentUser?.email || "",
+      avatar: data.avatar || null,
+      createdAt: data.createdAt || currentUser?.createdAt || Date.now(),
+    };
+    if (auth.currentUser) {
+      auth.currentUser.displayName = currentUser.name;
+      auth.currentUser.email = currentUser.email;
+    }
+  }
+
+  function detachSnapshotListener() {
+    if (syncPollTimer) {
+      clearInterval(syncPollTimer);
+      syncPollTimer = null;
+    }
+  }
+
+  function attachSnapshotListener() {
+    detachSnapshotListener();
+    if (!currentUser || !currentUser.uid) return;
+    syncPollTimer = setInterval(async () => {
+      try {
+        const token = localStorage.getItem(AUTH_TOKEN_KEY);
+        const payload = await requestJson("/api/me", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const remoteData = payload.data || {};
+        applyUserDoc({ ...remoteData, name: payload.user.name, email: payload.user.email, createdAt: payload.user.createdAt });
+        renderAccount();
+        renderAll();
+        applySettings();
+        applyLanguage();
+      } catch (error) {
+        console.error("Snapshot sync error:", error);
+      }
+    }, 10000);
+  }
+
+  async function loadUserData(fbUser) {
+    currentUser = {
+      uid: fbUser.uid,
+      name: fbUser.displayName || (fbUser.email ? fbUser.email.split("@")[0] : "User"),
+      email: fbUser.email || "",
+      avatar: null,
+      createdAt: null,
+    };
+    try {
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      const payload = await requestJson("/api/me", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      applyUserDoc({ ...(payload.data || {}), name: payload.user.name, email: payload.user.email, createdAt: payload.user.createdAt });
+    } catch (error) {
+      console.error("Failed to load user data:", error);
+      toast("Couldn't load your data. Check your connection.");
+    }
+    attachSnapshotListener();
+    renderAccount();
+    renderAll();
+    applySettings();
+    applyLanguage();
+  }
+
+  function resetLocalState() {
+    detachSnapshotListener();
+    clearTimeout(syncTimer);
+    currentUser = null;
+    notes = [];
+    reminders = [];
+    categories = defaultCategories();
+    tags = [];
+    settings = createDefaultSettings();
+  }
+
+  function friendlyAuthError(error) {
+    const map = {
+      "auth/email-already-in-use": "That email already has an account. Try signing in instead.",
+      "auth/invalid-email": "That email address looks invalid.",
+      "auth/weak-password": "Password should be at least 6 characters.",
+      "auth/user-not-found": "No account found with that email.",
+      "auth/wrong-password": "Incorrect password.",
+      "auth/invalid-credential": "Incorrect email or password.",
+      "auth/too-many-requests": "Too many attempts. Please wait and try again.",
+      "auth/network-request-failed": "Network error. Check your connection.",
+      "auth/requires-recent-login": "Please sign out and back in, then try that again.",
+    };
+    return (error && (map[error.code] || error.message)) || "Something went wrong. Please try again.";
+  }
+
+  function persistNotes() {
+    notes = notes.map(migrateNote);
+    scheduleSync();
+  }
+  function persistReminders() { scheduleSync(); }
+  function persistCategories() { scheduleSync(); }
+  function persistTags() { scheduleSync(); }
+  function persistSettings() { scheduleSync(); }
 
   /* ---------- elements ---------- */
   const $ = (sel) => document.querySelector(sel);
@@ -75,22 +331,55 @@
   /* ---------- boot sequence ---------- */
   function boot() {
     applySettings();
-    setTimeout(() => {
-      splash.classList.add("hidden");
-      if (currentUser) {
+
+    const authReady = new Promise((resolve) => {
+      const unsubscribe = auth.onAuthStateChanged((fbUser) => {
+        unsubscribe();
+        resolve(fbUser);
+      });
+    });
+
+    authReady
+      .then(async (fbUser) => {
+        if (fbUser) await loadUserData(fbUser);
+        setTimeout(() => {
+          splash.classList.add("hidden");
+          if (fbUser) {
+            enterApp();
+          } else {
+            landing.classList.add("visible");
+          }
+        }, 900);
+      })
+      .catch(() => {
+        setTimeout(() => {
+          splash.classList.add("hidden");
+          landing.classList.add("visible");
+        }, 900);
+      });
+
+    // Keep reacting to sign-in/sign-out that happens after the initial load
+    // (e.g. via the auth modal), separate from the one-shot promise above.
+    auth.onAuthStateChanged(async (fbUser) => {
+      if (fbUser && (!currentUser || currentUser.uid !== fbUser.uid)) {
+        await loadUserData(fbUser);
+        closeAuth();
         enterApp();
-      } else {
+      } else if (!fbUser && currentUser) {
+        resetLocalState();
+        app.classList.remove("visible");
         landing.classList.add("visible");
       }
-    }, 900);
+    });
   }
 
   function enterApp() {
     landing.classList.remove("visible");
     app.classList.add("visible");
+    applySettings();
+    applyLanguage();
     renderAccount();
     renderAll();
-    applyLanguage();
     startReminderWatcher();
   }
 
@@ -108,26 +397,29 @@
     $("#language-select").value = settings.language;
     $$(".theme-swatch").forEach((s) => s.classList.toggle("active", s.dataset.theme === settings.theme));
     $$("#font-size-options .filter").forEach((b) => b.classList.toggle("active", b.dataset.font === settings.fontSize));
-    store.set("bloom.settings", settings);
   }
 
   $$(".theme-swatch").forEach((btn) => {
     btn.addEventListener("click", () => {
       settings.theme = btn.dataset.theme;
       applySettings();
+      persistSettings();
     });
   });
   $("#toggle-dark").addEventListener("change", (e) => {
     settings.mode = e.target.checked ? "dark" : "light";
     applySettings();
+    persistSettings();
   });
   $("#toggle-compact").addEventListener("change", (e) => {
     settings.compact = e.target.checked;
     applySettings();
+    persistSettings();
   });
   $("#toggle-offline").addEventListener("change", (e) => {
     settings.offline = e.target.checked;
     applySettings();
+    persistSettings();
     toast(settings.offline ? "Offline mode enabled" : "Offline mode disabled");
   });
 
@@ -135,6 +427,7 @@
     btn.addEventListener("click", () => {
       settings.fontSize = btn.dataset.font;
       applySettings();
+      persistSettings();
     });
   });
 
@@ -144,6 +437,7 @@
     }
     settings.notifications = e.target.checked;
     applySettings();
+    persistSettings();
     toast(settings.notifications ? "Reminder notifications on" : "Reminder notifications off");
   });
 
@@ -166,6 +460,7 @@
     settings.language = e.target.value;
     applySettings();
     applyLanguage();
+    persistSettings();
     toast("Language updated");
   });
 
@@ -266,6 +561,8 @@
     $$(".auth-tab").forEach((t) => t.classList.toggle("active", t.dataset.authTab === tab));
     $("#signin-form").hidden = tab !== "signin";
     $("#signup-form").hidden = tab !== "signup";
+    $("#signin-error").textContent = "";
+    $("#signup-error").textContent = "";
   }
   $$(".auth-tab").forEach((t) => t.addEventListener("click", () => switchAuthTab(t.dataset.authTab)));
 
@@ -288,24 +585,25 @@
     });
   });
 
-  $("#signin-form").addEventListener("submit", (e) => {
+  $("#signin-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const email = $("#signin-email").value.trim();
-    const users = store.get("bloom.users", {});
-    const record = users[email];
-    if (!record || record.password !== $("#signin-password").value) {
-      $("#signin-error").textContent = "No account matches that email and password.";
-      return;
-    }
+    const password = $("#signin-password").value;
     $("#signin-error").textContent = "";
-    currentUser = { name: record.name, email };
-    store.set("bloom.user", currentUser);
-    closeAuth();
-    enterApp();
-    toast(`Welcome back, ${record.name}`);
+    const submitBtn = e.target.querySelector("button[type=submit]");
+    submitBtn.classList.add("btn-loading");
+    try {
+      await auth.signInWithEmailAndPassword(email, password);
+      // auth.onAuthStateChanged (in boot()) loads the user's Firestore
+      // data and calls enterApp() once it's ready.
+    } catch (error) {
+      $("#signin-error").textContent = friendlyAuthError(error);
+    } finally {
+      submitBtn.classList.remove("btn-loading");
+    }
   });
 
-  $("#signup-form").addEventListener("submit", (e) => {
+  $("#signup-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const name = $("#signup-name").value.trim();
     const email = $("#signup-email").value.trim();
@@ -315,19 +613,18 @@
       $("#signup-error").textContent = "Passwords don't match.";
       return;
     }
-    const users = store.get("bloom.users", {});
-    if (users[email]) {
-      $("#signup-error").textContent = "An account with that email already exists.";
-      return;
-    }
-    users[email] = { name, password: pw, since: Date.now() };
-    store.set("bloom.users", users);
     $("#signup-error").textContent = "";
-    currentUser = { name, email };
-    store.set("bloom.user", currentUser);
-    closeAuth();
-    enterApp();
-    toast(`Welcome to Bloom, ${name}`);
+    const submitBtn = e.target.querySelector("button[type=submit]");
+    submitBtn.classList.add("btn-loading");
+    try {
+      await auth.createUserWithEmailAndPassword(email, pw, name);
+      // auth.onAuthStateChanged (in boot()) picks this new session up
+      // and loads the backed-up data for the new account.
+    } catch (error) {
+      $("#signup-error").textContent = friendlyAuthError(error);
+    } finally {
+      submitBtn.classList.remove("btn-loading");
+    }
   });
 
   function renderAccount() {
@@ -349,7 +646,7 @@
 
   function renderAvatarInto(el, user) {
     if (user && user.avatar) {
-      el.innerHTML = `<img src="${user.avatar}" alt="${escapeHtml(user.name)}" />`;
+      el.innerHTML = `<img src="${user.avatar}" alt="${escapeHtml(user.name || "")}" />`;
     } else {
       el.textContent = user && user.name ? user.name.charAt(0).toUpperCase() : "B";
     }
@@ -359,14 +656,12 @@
   const profileOverlay = $("#profile-overlay");
   function openProfile() {
     if (!currentUser) return;
-    $("#profile-name").value = currentUser.name;
-    $("#profile-email").value = currentUser.email;
+    $("#profile-name").value = currentUser.name || "";
+    $("#profile-email").value = currentUser.email || "";
     renderAvatarInto($("#profile-avatar-preview"), currentUser);
-    const users = store.get("bloom.users", {});
-    const record = users[currentUser.email];
     $("#profile-stat-notes").textContent = notes.filter((n) => !n.deleted).length;
-    $("#profile-stat-since").textContent = record && record.since
-      ? new Date(record.since).toLocaleDateString([], { month: "long", year: "numeric" })
+    $("#profile-stat-since").textContent = currentUser.createdAt
+      ? new Date(currentUser.createdAt).toLocaleDateString([], { month: "long", year: "numeric" })
       : "—";
     profileOverlay.classList.add("visible");
   }
@@ -378,42 +673,82 @@
   $("#profile-avatar-upload-btn").addEventListener("click", () => $("#profile-avatar-input").click());
   $("#profile-avatar-input").addEventListener("change", (e) => {
     const file = e.target.files[0];
-    if (!file) return;
+    if (!file || !currentUser) return;
     const reader = new FileReader();
     reader.onload = () => {
-      currentUser.avatar = reader.result;
-      renderAvatarInto($("#profile-avatar-preview"), currentUser);
+      const img = new Image();
+      img.onload = () => {
+        // Downscale to a small square so the avatar stays well under
+        // Firestore's per-document size limit.
+        const size = 128;
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        const scale = Math.max(size / img.width, size / img.height);
+        const w = img.width * scale;
+        const h = img.height * scale;
+        ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+        currentUser.avatar = dataUrl;
+        renderAvatarInto($("#profile-avatar-preview"), currentUser);
+        scheduleSync();
+      };
+      img.onerror = () => toast("Couldn't read that image");
+      img.src = reader.result;
     };
     reader.readAsDataURL(file);
   });
   $("#profile-avatar-remove-btn").addEventListener("click", () => {
-    delete currentUser.avatar;
+    if (!currentUser) return;
+    currentUser.avatar = null;
     renderAvatarInto($("#profile-avatar-preview"), currentUser);
+    scheduleSync();
   });
 
-  $("#profile-form").addEventListener("submit", (e) => {
+  $("#profile-form").addEventListener("submit", async (e) => {
     e.preventDefault();
+    if (!currentUser) return;
     const name = $("#profile-name").value.trim();
     const email = $("#profile-email").value.trim();
     if (!name || !email) return;
-    const users = store.get("bloom.users", {});
-    const oldRecord = users[currentUser.email] || {};
-    delete users[currentUser.email];
-    users[email] = { ...oldRecord, name };
-    store.set("bloom.users", users);
-    currentUser = { ...currentUser, name, email };
-    store.set("bloom.user", currentUser);
-    renderAccount();
-    closeProfile();
-    toast("Profile updated");
+    const submitBtn = e.target.querySelector(".auth-submit");
+    if (submitBtn) submitBtn.classList.add("btn-loading");
+    try {
+      const fbUser = auth.currentUser;
+      if (fbUser && name !== currentUser.name) {
+        await fbUser.updateProfile({ displayName: name });
+      }
+      if (fbUser && email !== currentUser.email) {
+        await fbUser.updateEmail(email);
+      }
+      currentUser.name = name;
+      currentUser.email = email;
+      if (auth.currentUser) {
+        auth.currentUser.displayName = name;
+        auth.currentUser.email = email;
+      }
+      scheduleSync();
+      renderAccount();
+      closeProfile();
+      toast("Profile updated");
+    } catch (error) {
+      toast(friendlyAuthError(error));
+    } finally {
+      if (submitBtn) submitBtn.classList.remove("btn-loading");
+    }
   });
 
-  $("#account-signout").addEventListener("click", () => {
-    currentUser = null;
-    localStorage.removeItem("bloom.user");
-    app.classList.remove("visible");
-    landing.classList.add("visible");
-    toast("Signed out");
+  $("#account-signout").addEventListener("click", async () => {
+    try {
+      await auth.signOut();
+      // auth.onAuthStateChanged (in boot()) clears local state and
+      // shows the landing page.
+      toast("Signed out");
+    } catch (error) {
+      console.error(error);
+      toast("Couldn't sign out. Try again.");
+    }
   });
 
   /* ---------- tab navigation ---------- */
@@ -489,9 +824,6 @@
   });
 
   /* ---------- categories & tags ---------- */
-  function persistCategories() { store.set("bloom.categories", categories); }
-  function persistTags() { store.set("bloom.tags", tags); }
-
   function renderCategoryOptions() {
     const composerSelect = $("#note-category-select");
     const filterSelect = $("#notes-category-filter");
@@ -614,10 +946,8 @@
   });
 
   /* ---------- notes ---------- */
-  function persistNotes() { store.set("bloom.notes", notes); }
-
   document.addEventListener("DOMContentLoaded", () => {
-    if (document.queryCommandSupported("styleWithCSS")) {
+    if (document.queryCommandSupported && document.queryCommandSupported("styleWithCSS")) {
       document.execCommand("styleWithCSS", false, true);
     }
   });
@@ -704,8 +1034,6 @@
   noteInput.addEventListener("input", updateToolbarState);
   noteInput.addEventListener("focus", updateToolbarState);
   noteInput.addEventListener("blur", () => {
-    // Give any toolbar-button mousedown (which runs before this blur)
-    // a chance to keep things in sync; otherwise clear the active state.
     setTimeout(() => {
       if (document.activeElement !== noteInput) updateToolbarState();
     }, 0);
@@ -729,6 +1057,7 @@
   }
 
   function addNote() {
+    if (!currentUser) return;
     const html = noteInput.innerHTML.trim();
     const text = noteInput.textContent.trim();
     const hasChecklist = checklistDraft.length > 0;
@@ -744,6 +1073,7 @@
         favorite: false,
         archived: false,
         deleted: false,
+        deletedAt: null,
         color: pendingNoteColor,
         category: $("#note-category-select").value || "Personal",
         tags: [...pendingNoteTags],
@@ -824,7 +1154,7 @@
     const grid = $("#notes-grid");
     const filtered = notes.filter(matchesNotesFilters);
     grid.querySelectorAll(".note-card").forEach((el) => el.remove());
-    
+
     const emptyEl = $("#notes-empty");
     if (emptyEl) {
       emptyEl.hidden = filtered.length > 0;
@@ -841,7 +1171,7 @@
     const grid = $("#favorites-grid");
     grid.querySelectorAll(".note-card").forEach((el) => el.remove());
     const favs = sortNotes(notes.filter((n) => n.favorite && !n.deleted));
-    
+
     const emptyEl = $("#favorites-empty");
     if (emptyEl) {
       emptyEl.hidden = favs.length > 0;
@@ -855,7 +1185,7 @@
     const grid = $("#trash-grid");
     grid.querySelectorAll(".note-card").forEach((el) => el.remove());
     const trashed = notes.filter((n) => n.deleted).sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
-    
+
     const emptyEl = $("#trash-empty");
     if (emptyEl) {
       emptyEl.hidden = trashed.length > 0;
@@ -1065,6 +1395,10 @@
       finishNoteEdit(body, note);
       return;
     }
+    startNoteEdit(body, note);
+  }
+
+  function startNoteEdit(body, note) {
     body.setAttribute("contenteditable", "true");
     body.focus();
     let saveTimer = null;
@@ -1093,7 +1427,6 @@
 
   /* ---------- note preview modal ---------- */
   const noteModalOverlay = $("#note-modal-overlay");
-  const noteModal = $(".note-modal");
   let currentModalNoteId = null;
 
   function openNoteModal(noteId) {
@@ -1153,11 +1486,8 @@
 
     editBtn.onclick = () => {
       closeNoteModal();
-      const card = document.querySelector(`[data-id="${note.id}"]`);
-      if (card) {
-        const body = card.closest(".note-card")?.querySelector(".note-body");
-        if (body) startNoteEdit(body, note);
-      }
+      const body = document.querySelector(`.note-body[data-id="${note.id}"]`);
+      if (body) startNoteEdit(body, note);
     };
 
     if (inTrash) {
@@ -1169,7 +1499,8 @@
         if (!ok) return;
         notes = notes.filter((n) => n.id !== note.id);
         closeNoteModal();
-        rerenderAllViews();
+        persistNotes();
+        renderNotes(); renderFavorites(); renderTrash(); renderDashboard(); renderCalendar();
         toast("Note permanently deleted");
       };
     } else {
@@ -1187,9 +1518,10 @@
 
       deleteBtn.onclick = () => {
         note.deleted = true;
+        note.deletedAt = Date.now();
         persistNotes();
         closeNoteModal();
-        rerenderAllViews();
+        renderNotes(); renderFavorites(); renderTrash(); renderDashboard(); renderCalendar();
         toast("Note moved to Trash");
       };
     }
@@ -1204,9 +1536,8 @@
   });
 
   /* ---------- reminders ---------- */
-  function persistReminders() { store.set("bloom.reminders", reminders); }
-
   $("#add-reminder-btn").addEventListener("click", () => {
+    if (!currentUser) return;
     const text = $("#reminder-input").value.trim();
     const time = $("#reminder-time").value;
     if (!text) return;
@@ -1461,7 +1792,10 @@
   updateTimerDisplay();
 
   /* ---------- reminder due notifications ---------- */
+  let reminderWatcherStarted = false;
   function startReminderWatcher() {
+    if (reminderWatcherStarted) return;
+    reminderWatcherStarted = true;
     checkDueReminders();
     setInterval(checkDueReminders, 30 * 1000);
   }

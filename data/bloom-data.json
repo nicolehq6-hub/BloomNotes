@@ -1,0 +1,47 @@
+{
+  "users": {
+    "0425b50a-ce49-4971-bc01-d9475618ee5b": {
+      "id": "0425b50a-ce49-4971-bc01-d9475618ee5b",
+      "name": "Test User",
+      "email": "test@example.com",
+      "password": "secret123",
+      "createdAt": 1785635879943,
+      "data": {
+        "notes": [],
+        "reminders": [],
+        "categories": [
+          "Personal",
+          "School",
+          "Work",
+          "Ideas"
+        ],
+        "tags": [],
+        "settings": {}
+      }
+    },
+    "d7a63d43-e81e-47d5-91f5-7c4c961204cb": {
+      "id": "d7a63d43-e81e-47d5-91f5-7c4c961204cb",
+      "name": "nicole",
+      "email": "coledummy619@gmail.com",
+      "password": "nicole8989@",
+      "createdAt": 1785635988436,
+      "data": {
+        "notes": [],
+        "reminders": [],
+        "categories": [
+          "Personal",
+          "School",
+          "Work",
+          "Ideas"
+        ],
+        "tags": [],
+        "settings": {}
+      }
+    }
+  },
+  "sessions": {
+    "6ca85028a23a02c84d2fe17795c0f29c952c576fb0acf92f": "0425b50a-ce49-4971-bc01-d9475618ee5b",
+    "f4c5786ef7468ba15175a14f6317d4c77830f516aeb34c85": "0425b50a-ce49-4971-bc01-d9475618ee5b",
+    "6bb4659e5a1fc6651c3e6a222ea00f347dfe3df8788f64ff": "d7a63d43-e81e-47d5-91f5-7c4c961204cb"
+  }
+}

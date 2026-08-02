@@ -1420,8 +1420,19 @@
         persistNotes();
       }, 600);
     };
+    const onPaste = (e) => {
+      const clipboard = e.clipboardData || window.clipboardData;
+      const text = clipboard ? clipboard.getData("text/plain") : null;
+      if (text) {
+        e.preventDefault();
+        const escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\r?\n/g, "<br>");
+        document.execCommand("insertHTML", false, escaped);
+      }
+    };
     body.addEventListener("input", onInput);
+    body.addEventListener("paste", onPaste);
     body._onInput = onInput;
+    body._onPaste = onPaste;
     const onBlur = () => finishNoteEdit(body, note);
     body.addEventListener("blur", onBlur, { once: true });
   }
@@ -1877,6 +1888,10 @@
   function normalizeNoteHtml(html) {
     const trimmed = html.trim();
     if (!trimmed) return "";
+    const isEncodedSource = /&lt;\/?[a-z][^&]*&gt;/i.test(trimmed);
+    if (isEncodedSource) {
+      return trimmed.replace(/\r?\n/g, "<br>");
+    }
     const lower = trimmed.toLowerCase();
     if (lower.includes("<html") || lower.includes("<head") || lower.includes("<body") || lower.includes("<script") || lower.includes("<style")) {
       return escapeHtml(trimmed).replace(/\r?\n/g, "<br>");

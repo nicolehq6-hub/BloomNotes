@@ -1029,6 +1029,15 @@
   noteInput.addEventListener("keydown", (e) => {
     if (e.ctrlKey && e.key === "Enter") addNote();
   });
+  noteInput.addEventListener("paste", (e) => {
+    const clipboard = e.clipboardData || window.clipboardData;
+    const text = clipboard ? clipboard.getData("text/plain") : null;
+    if (text) {
+      e.preventDefault();
+      const escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
+      document.execCommand("insertHTML", false, escaped);
+    }
+  });
   noteInput.addEventListener("keyup", updateToolbarState);
   noteInput.addEventListener("mouseup", updateToolbarState);
   noteInput.addEventListener("input", updateToolbarState);
@@ -1058,7 +1067,8 @@
 
   function addNote() {
     if (!currentUser) return;
-    const html = noteInput.innerHTML.trim();
+    const rawHtml = noteInput.innerHTML.trim();
+    const html = normalizeNoteHtml(rawHtml);
     const text = noteInput.textContent.trim();
     const hasChecklist = checklistDraft.length > 0;
     if (!text && !hasChecklist) return; // need at least a note or a checklist
@@ -1418,7 +1428,7 @@
 
   function finishNoteEdit(body, note) {
     body.setAttribute("contenteditable", "false");
-    note.html = body.innerHTML;
+    note.html = normalizeNoteHtml(body.innerHTML);
     note.updated = Date.now();
     persistNotes();
     renderNotes(); renderFavorites(); renderTrash(); renderDashboard();
@@ -1862,6 +1872,17 @@
     const div = document.createElement("div");
     div.innerHTML = html;
     return div.textContent || "";
+  }
+
+  function normalizeNoteHtml(html) {
+    const trimmed = html.trim();
+    if (!trimmed) return "";
+    const lower = trimmed.toLowerCase();
+    if (lower.includes("<html") || lower.includes("<head") || lower.includes("<body") || lower.includes("<script") || lower.includes("<style")) {
+      return escapeHtml(trimmed).replace(/\r?\n/g, "<br>");
+    }
+    const doc = new DOMParser().parseFromString(trimmed, "text/html");
+    return doc.body ? doc.body.innerHTML : escapeHtml(trimmed).replace(/\r?\n/g, "<br>");
   }
 
   /* ---------- render all ---------- */

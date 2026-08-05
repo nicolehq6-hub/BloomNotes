@@ -42,10 +42,10 @@
   <div class="app">
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand-mark" aria-hidden="true">
+        <div class="brand-mark" id="burger-btn" role="button" tabindex="0" aria-expanded="false" aria-label="Toggle sidebar">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 7.5a4.5 4.5 0 1 1 4.5 4.5M12 7.5A4.5 4.5 0 1 0 7.5 12M12 7.5V9m-4.5 3a4.5 4.5 0 1 1 4.5 4.5M7.5 12H9m3 4.5a4.5 4.5 0 1 0 4.5-4.5M12 16.5V15m4.5-3a4.5 4.5 0 1 0-4.5-4.5M16.5 12H15"/></svg>
         </div>
-        <div>
+        <div class="brand-text">
           <h1 class="brand-name">Bloom</h1>
           <p class="brand-tagline">Minimal productivity</p>
         </div>
@@ -130,19 +130,27 @@
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
             </button>
           </div>
-          <button class="burger-btn" id="burger-btn" aria-label="Open options" aria-expanded="false">
-            <span></span><span></span><span></span>
-          </button>
         </div>
       </header>
 
       <!-- Notes Tab -->
       <section class="tab-panel active" id="panel-notes" role="tabpanel" aria-labelledby="tab-notes">
-        <div class="composer card">
-          <div class="editor-toolbar" id="editor-toolbar" role="toolbar" aria-label="Note formatting">
-            <button type="button" class="toolbar-btn" data-cmd="formatBlock" data-value="H2" title="Heading" aria-label="Heading">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4v16M14 4v16M4 12h10"></path><path d="M17 10c0-1.1.9-2 2-2s2 .9 2 2c0 1.5-4 3-4 6h4"></path></svg>
-            </button>
+        <div class="notes-dashboard">
+          <aside class="composer-panel">
+            <div class="composer-panel-header">
+              <div>
+                <p class="composer-panel-label">Create note</p>
+                <p class="composer-panel-caption">Compose a quick note, checklist, or idea.</p>
+              </div>
+              <button class="btn btn-ghost btn-icon composer-close" id="close-note-panel" type="button" aria-label="Close editor">
+                <svg width="16" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+              </button>
+            </div>
+            <div class="composer card">
+              <div class="editor-toolbar" id="editor-toolbar" role="toolbar" aria-label="Note formatting">
+                <button type="button" class="toolbar-btn" data-cmd="formatBlock" data-value="H2" title="Heading" aria-label="Heading">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4v16M14 4v16M4 12h10"></path><path d="M17 10c0-1.1.9-2 2-2s2 .9 2 2c0 1.5-4 3-4 6h4"></path></svg>
+                </button>
             <button type="button" class="toolbar-btn" data-cmd="bold" title="Bold" aria-label="Bold">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4h7a3.5 3.5 0 0 1 0 7H6zM6 11h8a3.5 3.5 0 0 1 0 7H6z"></path></svg>
             </button>
@@ -221,15 +229,16 @@
             </button>
           </div>
         </div>
+          </aside>
 
-        <div class="toolbar">
-          <div class="search">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-            <input type="text" id="note-search" placeholder="Search notes…" />
-          </div>
-          <button class="btn btn-ghost" id="clear-notes-btn">Clear all</button>
-        </div>
-
+          <div class="notes-list-panel">
+            <div class="toolbar notes-search-bar">
+              <div class="search">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                <input type="text" id="note-search" placeholder="Search notes…" />
+              </div>
+              <button class="btn btn-ghost" id="clear-notes-btn">Clear all</button>
+            </div>
         <div class="toolbar toolbar-secondary">
           <div class="filters" id="notes-view-filters">
             <button class="filter active" data-view="all">All</button>
@@ -262,6 +271,21 @@
             <p>Your first idea is waiting above.</p>
           </div>
         </div>
+          </div>
+        </div>
+
+        <div class="composer-overlay" id="composer-overlay" hidden></div>
+        <button class="open-note-panel-btn btn btn-primary" id="open-note-panel" type="button" aria-label="Open note editor">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          New Note
+        </button>
+
+        <nav class="mobile-bottom-nav" aria-label="Mobile navigation">
+          <button type="button" class="mobile-nav-item active" data-jump="notes">Notes</button>
+          <button type="button" class="mobile-nav-item" data-jump="reminders">Reminders</button>
+          <button type="button" class="mobile-nav-item" data-jump="favorites">Favorites</button>
+          <button type="button" class="mobile-nav-item" data-jump="trash">Trash</button>
+        </nav>
       </section>
 
       <!-- Reminders Tab -->

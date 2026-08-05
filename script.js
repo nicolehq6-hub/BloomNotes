@@ -706,30 +706,48 @@
   function updateToolbarState() {
     const editor = $("#note-input");
     const sel = window.getSelection();
-    const selectionInEditor = !!(
-      sel && sel.anchorNode && editor.contains(
-        sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentNode
-      )
-    );
-    $$(".toolbar-btn").forEach((btn) => {
-      if (!selectionInEditor) { btn.classList.remove("active"); return; }
+
+    // Determine whether the current selection (any range) intersects the editor
+    let selectionInEditor = false;
+    try {
+      if (sel && sel.rangeCount) {
+        for (let i = 0; i < sel.rangeCount; i++) {
+          const range = sel.getRangeAt(i);
+          const container = range.commonAncestorContainer;
+          const node = container.nodeType === 1 ? container : container.parentNode;
+          if (node && editor.contains(node)) { selectionInEditor = true; break; }
+        }
+      }
+    } catch (e) {
+      selectionInEditor = false;
+    }
+
+    $$('.toolbar-btn').forEach((btn) => {
       const cmd = btn.dataset.cmd;
       let isActive = false;
+
+      if (!selectionInEditor) {
+        // If the selection is outside the editor, clear active state
+        btn.classList.remove('active');
+        return;
+      }
+
       try {
-        if (cmd === "formatBlock") {
-          const val = document.queryCommandValue("formatBlock") || "";
-          isActive = val.toLowerCase() === (btn.dataset.value || "").toLowerCase();
-        } else if (cmd === "createLink") {
+        if (cmd === 'formatBlock') {
+          const val = (document.queryCommandValue('formatBlock') || '').toString();
+          isActive = val.toLowerCase() === (btn.dataset.value || '').toLowerCase();
+        } else if (cmd === 'createLink') {
           const node = sel.anchorNode;
           const el = node && (node.nodeType === 1 ? node : node.parentElement);
-          isActive = !!(el && el.closest && el.closest("a"));
+          isActive = !!(el && el.closest && el.closest('a'));
         } else {
-          isActive = document.queryCommandState(cmd);
+          isActive = !!document.queryCommandState(cmd);
         }
-      } catch {
+      } catch (err) {
         isActive = false;
       }
-      btn.classList.toggle("active", isActive);
+
+      btn.classList.toggle('active', isActive);
     });
   }
 
@@ -748,9 +766,16 @@
       if (document.activeElement !== noteInput) updateToolbarState();
     }, 0);
   });
-  document.addEventListener("selectionchange", () => {
-    if (document.activeElement === noteInput) updateToolbarState();
-  });
+  // Always respond to selection changes so toolbar active states stay accurate
+  document.addEventListener("selectionchange", updateToolbarState);
+
+  // Observe DOM changes inside the editor (paste, formatting changes) and update toolbar
+  try {
+    const observer = new MutationObserver(() => updateToolbarState());
+    observer.observe(noteInput, { subtree: true, childList: true, characterData: true });
+  } catch (e) {
+    // MutationObserver may not be available in some environments — ignore safely
+  }
   $("#add-note-btn").addEventListener("click", addNote);
 
   function resetComposerExtras() {

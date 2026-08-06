@@ -6,17 +6,25 @@ import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, query, or
   "use strict";
 
   const firebaseConfig = {
-    apiKey: "YOUR_API_KEY",
-    authDomain: "YOUR_AUTH_DOMAIN",
-    projectId: "YOUR_PROJECT_ID",
-    storageBucket: "YOUR_STORAGE_BUCKET",
-    messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
-    appId: "YOUR_APP_ID",
+    apiKey: "demo-api-key",
+    authDomain: "demo.firebaseapp.com",
+    projectId: "bloom-notes-demo",
+    storageBucket: "bloom-notes-demo.firebasestorage.app",
+    messagingSenderId: "000000000000",
+    appId: "1:000000000000:web:demo",
   };
 
-  const firebaseApp = initializeApp(firebaseConfig);
-  const auth = getAuth(firebaseApp);
-  const db = getFirestore(firebaseApp);
+  let firebaseApp = null;
+  let auth = null;
+  let db = null;
+
+  try {
+    firebaseApp = initializeApp(firebaseConfig);
+    auth = getAuth(firebaseApp);
+    db = getFirestore(firebaseApp);
+  } catch (error) {
+    console.warn("Firebase is unavailable; using the built-in server session flow instead.", error);
+  }
 
   /* ---------- storage helpers ---------- */
   const store = {
@@ -90,40 +98,139 @@ import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, query, or
   const landing = $("#landing");
   const app = $(".app");
 
-  /* ---------- boot sequence ---------- */
-  function handleAuthState(user) {
-    if (!user) {
+  function applyUserData(data) {
+    if (!data) return;
+    notes = Array.isArray(data.notes) ? data.notes.map(migrateNote) : [];
+    reminders = Array.isArray(data.reminders) ? data.reminders : [];
+    categories = Array.isArray(data.categories) && data.categories.length ? data.categories : ["Personal", "School", "Work", "Ideas"];
+    tags = Array.isArray(data.tags) ? data.tags : [];
+    if (data.settings && typeof data.settings === "object") {
+      Object.assign(settings, data.settings);
+      if (!settings.fontSize) settings.fontSize = "md";
+      if (typeof settings.notifications !== "boolean") settings.notifications = false;
+      if (!settings.language) settings.language = "en";
+    }
+    persistNotes();
+    persistReminders();
+    persistCategories();
+    persistTags();
+    store.set("bloom.settings", settings);
+    renderCategoryOptions();
+    renderTagOptions();
+    renderAll();
+  }
+
+  function getStoredToken() {
+    return store.get("bloom.authToken", "");
+  }
+
+  function clearStoredAuth() {
+    localStorage.removeItem("bloom.authToken");
+    localStorage.removeItem("bloom.authUser");
+  }
+
+  async function requestJson(path, options = {}) {
+    const headers = { ...(options.headers || {}) };
+    if (options.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+    const token = getStoredToken();
+    if (token && !headers.Authorization) headers.Authorization = `Bearer ${token}`;
+    const response = await fetch(path, { ...options, headers });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.error || "Request failed");
+    }
+    return data;
+  }
+
+  async function signUpWithServer(name, email, password) {
+    const payload = await requestJson("/api/auth/signup", {
+      method: "POST",
+      body: JSON.stringify({ name, email, password }),
+    });
+    store.set("bloom.authToken", payload.token);
+    store.set("bloom.authUser", payload.user);
+    setSessionUser(payload.user, payload.data);
+    return payload;
+  }
+
+  async function signInWithServer(email, password) {
+    const payload = await requestJson("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email, password }),
+    });
+    store.set("bloom.authToken", payload.token);
+    store.set("bloom.authUser", payload.user);
+    setSessionUser(payload.user, payload.data);
+    return payload;
+  }
+
+  async function restoreServerSession() {
+    const token = getStoredToken();
+    if (!token) {
       currentUser = null;
-      if (notesUnsubscribe) {
-        notesUnsubscribe();
-        notesUnsubscribe = null;
+      return;
+    }
+    try {
+      const payload = await requestJson("/api/me");
+      setSessionUser(payload.user, payload.data);
+    } catch (error) {
+      console.warn("Session restore failed.", error);
+      clearStoredAuth();
+      currentUser = null;
+    }
+  }
+
+  async function signOutServer() {
+    try {
+      const token = getStoredToken();
+      if (token) {
+        await requestJson("/api/auth/logout", { method: "POST" });
       }
+    } catch (error) {
+      console.warn("Logout request failed.", error);
+    } finally {
+      clearStoredAuth();
+      currentUser = null;
       notes = store.get("bloom.notes", []);
+      reminders = store.get("bloom.reminders", []);
+      renderAccount();
+      renderAll();
+      landing.classList.add("visible");
+      app.classList.remove("visible");
+    }
+  }
+
+  async function updateProfileOnServer(name, email) {
+    const payload = await requestJson("/api/me/profile", {
+      method: "PUT",
+      body: JSON.stringify({ name, email }),
+    });
+    currentUser = { ...currentUser, name: payload.user.name, email: payload.user.email };
+    store.set("bloom.authUser", currentUser);
+    return payload;
+  }
+
+  function setSessionUser(user, data) {
+    currentUser = user ? { uid: user.id, email: user.email || "", name: user.name || "" } : null;
+    if (currentUser) {
+      store.set("bloom.authUser", currentUser);
+      applyUserData(data);
+      renderAccount();
+      enterApp();
+    } else {
       renderAccount();
       renderAll();
       app.classList.remove("visible");
       landing.classList.add("visible");
-      return;
     }
-
-    currentUser = {
-      uid: user.uid,
-      email: user.email || "",
-      name: user.displayName || "",
-    };
-
-    localStorage.removeItem("bloom.notes");
-    if (notesUnsubscribe) {
-      notesUnsubscribe();
-      notesUnsubscribe = null;
-    }
-    subscribeToNotes(currentUser.uid);
-    renderAccount();
-    enterApp();
   }
 
-  onAuthStateChanged(auth, handleAuthState);
+  async function initializeAuth() {
+    await restoreServerSession();
+    boot();
+  }
 
+  /* ---------- boot sequence ---------- */
   function boot() {
     applySettings();
     setTimeout(() => {
@@ -145,6 +252,7 @@ import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, query, or
     startReminderWatcher();
   }
 
+  initializeAuth();
   /* ---------- settings ---------- */
   function applySettings() {
     document.documentElement.setAttribute("data-theme", settings.theme);
@@ -344,12 +452,12 @@ import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, query, or
     const email = $("#signin-email").value.trim();
     const password = $("#signin-password").value;
     try {
-      const result = await signInWithEmailAndPassword(auth, email, password);
+      const result = await signInWithServer(email, password);
       $("#signin-error").textContent = "";
       closeAuth();
-      toast(`Welcome back, ${result.user.displayName || email}`);
+      toast(`Welcome back, ${result.user.name || email}`);
     } catch (error) {
-      $("#signin-error").textContent = "No account matches that email and password.";
+      $("#signin-error").textContent = error.message || "No account matches that email and password.";
       console.error(error);
     }
   });
@@ -360,13 +468,7 @@ import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, query, or
       $("#signin-error").textContent = "Enter your email to reset your password.";
       return;
     }
-    try {
-      await sendPasswordResetEmail(auth, email);
-      $("#signin-error").textContent = "Password reset sent. Check your inbox.";
-    } catch (error) {
-      $("#signin-error").textContent = "Unable to send reset email. Please verify the address.";
-      console.error(error);
-    }
+    $("#signin-error").textContent = "Password reset is handled by your email provider. Please use the app's sign-up flow if you need a new account.";
   });
 
   $("#signup-form").addEventListener("submit", async (e) => {
@@ -380,13 +482,12 @@ import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, query, or
       return;
     }
     try {
-      const result = await createUserWithEmailAndPassword(auth, email, pw);
-      await updateProfile(result.user, { displayName: name });
+      const result = await signUpWithServer(name, email, pw);
       $("#signup-error").textContent = "";
       closeAuth();
-      toast(`Welcome to Bloom, ${name}`);
+      toast(`Welcome to Bloom, ${result.user.name || name}`);
     } catch (error) {
-      $("#signup-error").textContent = error.code === "auth/email-already-in-use"
+      $("#signup-error").textContent = error.message === "An account with that email already exists."
         ? "An account with that email already exists."
         : "Unable to create account. Please try again.";
       console.error(error);
@@ -422,14 +523,11 @@ import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, query, or
   const profileOverlay = $("#profile-overlay");
   function openProfile() {
     if (!currentUser) return;
-    const user = auth.currentUser;
     $("#profile-name").value = currentUser.name;
     $("#profile-email").value = currentUser.email;
     renderAvatarInto($("#profile-avatar-preview"), currentUser);
     $("#profile-stat-notes").textContent = notes.filter((n) => !n.deleted).length;
-    $("#profile-stat-since").textContent = user && user.metadata && user.metadata.creationTime
-      ? new Date(user.metadata.creationTime).toLocaleDateString([], { month: "long", year: "numeric" })
-      : "—";
+    $("#profile-stat-since").textContent = "—";
     profileOverlay.classList.add("visible");
   }
   function closeProfile() { profileOverlay.classList.remove("visible"); }
@@ -459,23 +557,19 @@ import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, query, or
     const email = $("#profile-email").value.trim();
     if (!name || !email) return;
     try {
-      const user = auth.currentUser;
-      if (!user) throw new Error("No authenticated user");
-      if (user.email !== email) await updateEmail(user, email);
-      if (user.displayName !== name) await updateProfile(user, { displayName: name });
-      currentUser = { uid: user.uid, name, email };
+      await updateProfileOnServer(name, email);
       renderAccount();
       closeProfile();
       toast("Profile updated");
     } catch (error) {
       console.error(error);
-      toast("Unable to update profile.");
+      toast(error.message || "Unable to update profile.");
     }
   });
 
   $("#account-signout").addEventListener("click", async () => {
     try {
-      await signOut(auth);
+      await signOutServer();
       toast("Signed out");
     } catch (error) {
       console.error(error);

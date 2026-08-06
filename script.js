@@ -1,5 +1,22 @@
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.10.0/firebase-app.js";
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail, updateProfile, updateEmail } from "https://www.gstatic.com/firebasejs/10.10.0/firebase-auth.js";
+import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, query, orderBy, writeBatch } from "https://www.gstatic.com/firebasejs/10.10.0/firebase-firestore.js";
+
 (() => {
   "use strict";
+
+  const firebaseConfig = {
+    apiKey: "YOUR_API_KEY",
+    authDomain: "YOUR_AUTH_DOMAIN",
+    projectId: "YOUR_PROJECT_ID",
+    storageBucket: "YOUR_STORAGE_BUCKET",
+    messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+    appId: "YOUR_APP_ID",
+  };
+
+  const firebaseApp = initializeApp(firebaseConfig);
+  const auth = getAuth(firebaseApp);
+  const db = getFirestore(firebaseApp);
 
   /* ---------- storage helpers ---------- */
   const store = {
@@ -17,7 +34,7 @@
   /* ---------- state ---------- */
   let notes = store.get("bloom.notes", []);
   let reminders = store.get("bloom.reminders", []);
-  let currentUser = store.get("bloom.user", null);
+  let currentUser = null;
   let reminderFilter = "all";
   let calDate = new Date();
   let selectedDay = null;
@@ -26,6 +43,7 @@
   let notesTagFilter = "";
   let notesSort = "newest";
   let editingNoteId = null;
+  let notesUnsubscribe = null;
 
   let categories = store.get("bloom.categories", ["Personal", "School", "Work", "Ideas"]);
   let tags = store.get("bloom.tags", []);
@@ -73,6 +91,39 @@
   const app = $(".app");
 
   /* ---------- boot sequence ---------- */
+  function handleAuthState(user) {
+    if (!user) {
+      currentUser = null;
+      if (notesUnsubscribe) {
+        notesUnsubscribe();
+        notesUnsubscribe = null;
+      }
+      notes = store.get("bloom.notes", []);
+      renderAccount();
+      renderAll();
+      app.classList.remove("visible");
+      landing.classList.add("visible");
+      return;
+    }
+
+    currentUser = {
+      uid: user.uid,
+      email: user.email || "",
+      name: user.displayName || "",
+    };
+
+    localStorage.removeItem("bloom.notes");
+    if (notesUnsubscribe) {
+      notesUnsubscribe();
+      notesUnsubscribe = null;
+    }
+    subscribeToNotes(currentUser.uid);
+    renderAccount();
+    enterApp();
+  }
+
+  onAuthStateChanged(auth, handleAuthState);
+
   function boot() {
     applySettings();
     setTimeout(() => {
@@ -288,24 +339,37 @@
     });
   });
 
-  $("#signin-form").addEventListener("submit", (e) => {
+  $("#signin-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const email = $("#signin-email").value.trim();
-    const users = store.get("bloom.users", {});
-    const record = users[email];
-    if (!record || record.password !== $("#signin-password").value) {
+    const password = $("#signin-password").value;
+    try {
+      const result = await signInWithEmailAndPassword(auth, email, password);
+      $("#signin-error").textContent = "";
+      closeAuth();
+      toast(`Welcome back, ${result.user.displayName || email}`);
+    } catch (error) {
       $("#signin-error").textContent = "No account matches that email and password.";
-      return;
+      console.error(error);
     }
-    $("#signin-error").textContent = "";
-    currentUser = { name: record.name, email };
-    store.set("bloom.user", currentUser);
-    closeAuth();
-    enterApp();
-    toast(`Welcome back, ${record.name}`);
   });
 
-  $("#signup-form").addEventListener("submit", (e) => {
+  $("#forgot-password").addEventListener("click", async () => {
+    const email = $("#signin-email").value.trim();
+    if (!email) {
+      $("#signin-error").textContent = "Enter your email to reset your password.";
+      return;
+    }
+    try {
+      await sendPasswordResetEmail(auth, email);
+      $("#signin-error").textContent = "Password reset sent. Check your inbox.";
+    } catch (error) {
+      $("#signin-error").textContent = "Unable to send reset email. Please verify the address.";
+      console.error(error);
+    }
+  });
+
+  $("#signup-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const name = $("#signup-name").value.trim();
     const email = $("#signup-email").value.trim();
@@ -315,19 +379,18 @@
       $("#signup-error").textContent = "Passwords don't match.";
       return;
     }
-    const users = store.get("bloom.users", {});
-    if (users[email]) {
-      $("#signup-error").textContent = "An account with that email already exists.";
-      return;
+    try {
+      const result = await createUserWithEmailAndPassword(auth, email, pw);
+      await updateProfile(result.user, { displayName: name });
+      $("#signup-error").textContent = "";
+      closeAuth();
+      toast(`Welcome to Bloom, ${name}`);
+    } catch (error) {
+      $("#signup-error").textContent = error.code === "auth/email-already-in-use"
+        ? "An account with that email already exists."
+        : "Unable to create account. Please try again.";
+      console.error(error);
     }
-    users[email] = { name, password: pw, since: Date.now() };
-    store.set("bloom.users", users);
-    $("#signup-error").textContent = "";
-    currentUser = { name, email };
-    store.set("bloom.user", currentUser);
-    closeAuth();
-    enterApp();
-    toast(`Welcome to Bloom, ${name}`);
   });
 
   function renderAccount() {
@@ -359,14 +422,13 @@
   const profileOverlay = $("#profile-overlay");
   function openProfile() {
     if (!currentUser) return;
+    const user = auth.currentUser;
     $("#profile-name").value = currentUser.name;
     $("#profile-email").value = currentUser.email;
     renderAvatarInto($("#profile-avatar-preview"), currentUser);
-    const users = store.get("bloom.users", {});
-    const record = users[currentUser.email];
     $("#profile-stat-notes").textContent = notes.filter((n) => !n.deleted).length;
-    $("#profile-stat-since").textContent = record && record.since
-      ? new Date(record.since).toLocaleDateString([], { month: "long", year: "numeric" })
+    $("#profile-stat-since").textContent = user && user.metadata && user.metadata.creationTime
+      ? new Date(user.metadata.creationTime).toLocaleDateString([], { month: "long", year: "numeric" })
       : "—";
     profileOverlay.classList.add("visible");
   }
@@ -391,29 +453,34 @@
     renderAvatarInto($("#profile-avatar-preview"), currentUser);
   });
 
-  $("#profile-form").addEventListener("submit", (e) => {
+  $("#profile-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const name = $("#profile-name").value.trim();
     const email = $("#profile-email").value.trim();
     if (!name || !email) return;
-    const users = store.get("bloom.users", {});
-    const oldRecord = users[currentUser.email] || {};
-    delete users[currentUser.email];
-    users[email] = { ...oldRecord, name };
-    store.set("bloom.users", users);
-    currentUser = { ...currentUser, name, email };
-    store.set("bloom.user", currentUser);
-    renderAccount();
-    closeProfile();
-    toast("Profile updated");
+    try {
+      const user = auth.currentUser;
+      if (!user) throw new Error("No authenticated user");
+      if (user.email !== email) await updateEmail(user, email);
+      if (user.displayName !== name) await updateProfile(user, { displayName: name });
+      currentUser = { uid: user.uid, name, email };
+      renderAccount();
+      closeProfile();
+      toast("Profile updated");
+    } catch (error) {
+      console.error(error);
+      toast("Unable to update profile.");
+    }
   });
 
-  $("#account-signout").addEventListener("click", () => {
-    currentUser = null;
-    localStorage.removeItem("bloom.user");
-    app.classList.remove("visible");
-    landing.classList.add("visible");
-    toast("Signed out");
+  $("#account-signout").addEventListener("click", async () => {
+    try {
+      await signOut(auth);
+      toast("Signed out");
+    } catch (error) {
+      console.error(error);
+      toast("Unable to sign out.");
+    }
   });
 
   /* ---------- tab navigation ---------- */
@@ -652,7 +719,60 @@
   });
 
   /* ---------- notes ---------- */
-  function persistNotes() { store.set("bloom.notes", notes); }
+  function getUserNotesCollection(userId) {
+    return collection(db, "users", userId, "notes");
+  }
+
+  function persistNotes() {
+    if (currentUser) return;
+    store.set("bloom.notes", notes);
+  }
+
+  async function saveNoteToFirestore(note) {
+    if (!currentUser) return;
+    try {
+      await setDoc(doc(getUserNotesCollection(currentUser.uid), note.id), note);
+    } catch (error) {
+      console.error("Error saving note", error);
+      toast("Unable to sync note");
+    }
+  }
+
+  async function deleteNoteFromFirestore(noteId) {
+    if (!currentUser) return;
+    try {
+      await deleteDoc(doc(getUserNotesCollection(currentUser.uid), noteId));
+    } catch (error) {
+      console.error("Error deleting note", error);
+      toast("Unable to sync note");
+    }
+  }
+
+  function persistNote(note) {
+    if (currentUser) {
+      saveNoteToFirestore(note);
+      return;
+    }
+    persistNotes();
+  }
+
+  function subscribeToNotes(userId) {
+    if (notesUnsubscribe) {
+      notesUnsubscribe();
+      notesUnsubscribe = null;
+    }
+    notesUnsubscribe = onSnapshot(
+      query(getUserNotesCollection(userId), orderBy("created", "desc")),
+      (snapshot) => {
+        notes = snapshot.docs.map((docSnap) => migrateNote({ id: docSnap.id, ...docSnap.data() }));
+        renderAll();
+      },
+      (error) => {
+        console.error("Notes sync error", error);
+        toast("Unable to sync notes");
+      }
+    );
+  }
 
   document.addEventListener("DOMContentLoaded", () => {
     if (document.queryCommandSupported("styleWithCSS")) {
@@ -826,7 +946,7 @@
       if ($("#notes-tag-filter")) $("#notes-tag-filter").value = "";
       $$("#notes-view-filters .filter").forEach((f) => f.classList.toggle("active", f.dataset.view === "all"));
 
-      persistNotes();
+      persistNote(notes[0]);
       renderNotes();
       renderDashboard();
       btn.classList.remove("btn-loading");
@@ -843,8 +963,7 @@
     if (!active.length) return;
     const ok = await askConfirm("Move all your notes to Trash?", "Move to Trash");
     if (!ok) return;
-    notes.forEach((n) => { if (!n.deleted) { n.deleted = true; n.deletedAt = Date.now(); } });
-    persistNotes();
+    notes.forEach((n) => { if (!n.deleted) { n.deleted = true; n.deletedAt = Date.now(); persistNote(n); } });
     renderAll();
     toast("All notes moved to Trash");
   });
@@ -854,8 +973,13 @@
     if (!trashed.length) return;
     const ok = await askConfirm("Permanently delete all notes in Trash? This can't be undone.", "Delete forever");
     if (!ok) return;
+    const deletedNotes = [...trashed];
     notes = notes.filter((n) => !n.deleted);
-    persistNotes();
+    if (currentUser) {
+      deletedNotes.forEach((note) => deleteNoteFromFirestore(note.id));
+    } else {
+      persistNotes();
+    }
     renderAll();
     toast("Trash emptied");
   });
@@ -1014,7 +1138,7 @@
         note.checklist.push({ id: uid(), text: val, done: false, children: [] });
         input.value = "";
         note.updated = Date.now();
-        persistNotes();
+        persistNote(note);
         rerenderNoteInPlace(note);
       });
       card.querySelector(".checklist-new-task").addEventListener("keydown", (e) => {
@@ -1023,7 +1147,7 @@
     }
 
     function rerenderAllViews() {
-      persistNotes();
+      persistNote(note);
       renderNotes();
       renderFavorites();
       renderTrash();
@@ -1032,7 +1156,7 @@
     }
 
     function rerenderNoteInPlace(n) {
-      persistNotes();
+      persistNote(n);
       const fresh = renderNoteCard(n);
       card.replaceWith(fresh);
       renderDashboard();
@@ -1041,16 +1165,19 @@
     if (!inTrash) {
       card.querySelector(".edit-btn").addEventListener("click", () => toggleNoteEdit(card, note));
       card.querySelector(".note-body").addEventListener("click", () => openNoteModal(note.id));
-      card.querySelector(".fav-btn").addEventListener("click", () => { note.favorite = !note.favorite; rerenderAllViews(); });
-      card.querySelector(".pin-btn").addEventListener("click", () => { note.pinned = !note.pinned; rerenderAllViews(); });
+      card.querySelector(".fav-btn").addEventListener("click", () => { note.favorite = !note.favorite; persistNote(note); rerenderAllViews(); });
+      card.querySelector(".pin-btn").addEventListener("click", () => { note.pinned = !note.pinned; persistNote(note); rerenderAllViews(); });
       card.querySelector(".dup-btn").addEventListener("click", () => {
         const now = Date.now();
-        notes.unshift({ ...note, id: uid(), pinned: false, created: now, updated: now, checklist: note.checklist.map((i) => ({ ...i, id: uid(), children: (i.children || []).map((c) => ({ ...c, id: uid() })) })) });
+        const duplicate = { ...note, id: uid(), pinned: false, favorite: false, created: now, updated: now, checklist: note.checklist.map((i) => ({ ...i, id: uid(), children: (i.children || []).map((c) => ({ ...c, id: uid() })) })) };
+        notes.unshift(duplicate);
+        persistNote(duplicate);
         rerenderAllViews();
         toast("Note duplicated");
       });
       card.querySelector(".archive-btn").addEventListener("click", () => {
         note.archived = !note.archived;
+        persistNote(note);
         rerenderAllViews();
         toast(note.archived ? "Note archived" : "Note restored");
       });
@@ -1061,6 +1188,7 @@
         if (!target) return;
         target.deleted = true;
         target.deletedAt = Date.now();
+        persistNote(target);
         card.remove();
         rerenderAllViews();
         toast("Note moved to Trash");
@@ -1070,6 +1198,7 @@
         const target = notes.find((n) => n.id === note.id);
         if (!target) return;
         target.deleted = false;
+        persistNote(target);
         card.remove();
         rerenderAllViews();
         toast("Note restored");
@@ -1078,6 +1207,11 @@
         const ok = await askConfirm("Permanently delete this note? This can't be undone.", "Delete forever");
         if (!ok) return;
         notes = notes.filter((n) => n.id !== note.id);
+        if (currentUser) {
+          deleteNoteFromFirestore(note.id);
+        } else {
+          persistNotes();
+        }
         card.remove();
         rerenderAllViews();
         toast("Note permanently deleted");
@@ -1108,14 +1242,14 @@
     row.querySelector(".checklist-item-check").addEventListener("click", () => {
       item.done = !item.done;
       note.updated = Date.now();
-      persistNotes();
+      persistNote(note);
       renderNotes(); renderFavorites(); renderTrash(); renderDashboard();
     });
     row.querySelector(".checklist-item-del").addEventListener("click", () => {
       if (isSub && parent) parent.children = parent.children.filter((c) => c.id !== item.id);
       else note.checklist = note.checklist.filter((i) => i.id !== item.id);
       note.updated = Date.now();
-      persistNotes();
+      persistNote(note);
       renderNotes(); renderFavorites(); renderTrash(); renderDashboard();
     });
     return row;
@@ -1136,7 +1270,7 @@
       saveTimer = setTimeout(() => {
         note.html = body.innerHTML;
         note.updated = Date.now();
-        persistNotes();
+        persistNote(note);
       }, 600);
     };
     body.addEventListener("input", onInput);
@@ -1149,7 +1283,7 @@
     body.setAttribute("contenteditable", "false");
     note.html = body.innerHTML;
     note.updated = Date.now();
-    persistNotes();
+    persistNote(note);
     renderNotes(); renderFavorites(); renderTrash(); renderDashboard();
     toast("Note saved");
   }
@@ -1243,14 +1377,14 @@
       pinBtn.textContent = note.pinned ? "📌 Unpin" : "📌 Pin";
       pinBtn.onclick = () => {
         note.pinned = !note.pinned;
-        persistNotes();
+        persistNote(note);
         updateNoteModalActions(note);
         renderNotes(); renderFavorites(); renderDashboard();
       };
 
       deleteBtn.onclick = () => {
         note.deleted = true;
-        persistNotes();
+        persistNote(note);
         closeNoteModal();
         rerenderAllViews();
         toast("Note moved to Trash");
